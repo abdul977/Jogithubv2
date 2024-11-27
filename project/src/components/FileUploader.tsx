@@ -1,20 +1,36 @@
-import React, { useCallback } from 'react';
-import { Upload, FileWarning } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { Upload, Folder, File, AlertCircle } from 'lucide-react';
 import { motion, useAnimation } from 'framer-motion';
 import { useSpring, animated } from '@react-spring/web';
+import { processFiles } from '../utils/fileProcessor';
+import { FileUploadZone } from './FileUploadZone';
+import { FileList } from './FileList';
 
 interface FileUploaderProps {
-  onFileSelect: (file: File) => void;
+  onFileSelect: (files: File[]) => void;
 }
 
 export function FileUploader({ onFileSelect }: FileUploaderProps) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [error, setError] = useState<string>('');
   const controls = useAnimation();
-  const [isDragging, setIsDragging] = React.useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const springProps = useSpring({
     scale: isDragging ? 1.02 : 1,
     config: { tension: 300, friction: 10 },
   });
+
+  const handleFilesSelected = useCallback(async (selectedFiles: File[]) => {
+    try {
+      const processedFiles = await processFiles(selectedFiles);
+      setFiles(processedFiles);
+      onFileSelect(processedFiles);
+      setError('');
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }, [onFileSelect]);
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
@@ -29,65 +45,69 @@ export function FileUploader({ onFileSelect }: FileUploaderProps) {
   };
 
   const handleDrop = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
+    async (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
       controls.start({ scale: 1 });
-      const file = e.dataTransfer.files[0];
-      if (file?.type === 'application/zip' || file?.name.endsWith('.zip')) {
-        onFileSelect(file);
+
+      const items = Array.from(e.dataTransfer.items);
+      const fileEntries: File[] = [];
+
+      for (const item of items) {
+        if (item.kind === 'file') {
+          const entry = item.webkitGetAsEntry();
+          if (entry) {
+            if (entry.isFile) {
+              const file = item.getAsFile();
+              if (file) fileEntries.push(file);
+            } else if (entry.isDirectory) {
+              const dirReader = (entry as any).createReader();
+              const entries = await new Promise<File[]>((resolve) => {
+                dirReader.readEntries((entries: any[]) => {
+                  const files: File[] = [];
+                  entries.forEach((entry: any) => {
+                    if (entry.isFile) {
+                      entry.file((file: File) => files.push(file));
+                    }
+                  });
+                  resolve(files);
+                });
+              });
+              fileEntries.push(...entries);
+            }
+          }
+        }
       }
+
+      handleFilesSelected(fileEntries);
     },
-    [onFileSelect, controls]
+    [handleFilesSelected, controls]
   );
 
   return (
-    <animated.div
-      style={springProps}
-      className="w-full max-w-2xl mx-auto"
-    >
-      <motion.label
+    <animated.div style={springProps} className="w-full max-w-2xl mx-auto space-y-4">
+      <FileUploadZone
         onDragEnter={handleDragEnter}
-        onDragOver={(e) => e.preventDefault()}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        className={`relative flex flex-col items-center justify-center w-full h-72 border-2 border-dashed rounded-xl cursor-pointer transition-all duration-300 bg-gradient-to-br from-white/50 to-white/30 backdrop-blur-md
-          ${isDragging ? 'border-indigo-400 bg-indigo-50/30' : 'border-gray-300 hover:border-indigo-300'}`}
-      >
+        isDragging={isDragging}
+        onFileSelect={handleFilesSelected}
+      />
+
+      {error && (
         <motion.div
-          initial={{ scale: 1 }}
-          animate={{ scale: isDragging ? 1.1 : 1 }}
-          className="flex flex-col items-center justify-center p-6 text-center"
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-red-50 border-l-4 border-red-400 p-4 rounded"
         >
-          <motion.div
-            animate={{ y: isDragging ? -10 : 0 }}
-            transition={{ type: "spring", stiffness: 300, damping: 20 }}
-          >
-            <Upload className={`w-16 h-16 mb-4 ${isDragging ? 'text-indigo-500' : 'text-gray-400'}`} />
-          </motion.div>
-          <motion.p
-            className="mb-2 text-xl font-semibold"
-            animate={{ color: isDragging ? '#6366F1' : '#4B5563' }}
-          >
-            Drop your ZIP file here
-          </motion.p>
-          <p className="mb-2 text-sm text-gray-500">
-            or click to select a file
-          </p>
-          <p className="text-xs text-gray-400">
-            ZIP files only (max. 100MB)
-          </p>
+          <div className="flex items-center">
+            <AlertCircle className="h-5 w-5 text-red-400 mr-2" />
+            <p className="text-sm text-red-700">{error}</p>
+          </div>
         </motion.div>
-        <input
-          type="file"
-          className="hidden"
-          accept=".zip"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) onFileSelect(file);
-          }}
-        />
-      </motion.label>
+      )}
+
+      {files.length > 0 && <FileList files={files} />}
     </animated.div>
   );
 }
