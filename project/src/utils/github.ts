@@ -62,9 +62,9 @@ export async function createGitHubRepo(
 export async function uploadToGitHub(
   token: string,
   repoName: string,
-  zipFile: File,
+  files: File[],
   existingRepo: boolean = false
-): Promise<void> {
+): Promise<string | void> {
   if (!token) {
     throw new Error('GitHub token is required');
   }
@@ -72,34 +72,28 @@ export async function uploadToGitHub(
   const octokit = new Octokit({ auth: token });
   
   try {
-    // Only wait for repository creation if it's a new repo
     if (!existingRepo) {
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
-    const zip = await JSZip.loadAsync(zipFile);
     const { data: user } = await octokit.users.getAuthenticated();
 
-    // If updating existing repo, create a new branch
     let branchName = '';
     if (existingRepo) {
       const timestamp = new Date().getTime();
       branchName = `update-${timestamp}`;
       
-      // Get default branch
       const { data: repo } = await octokit.repos.get({
         owner: user.login,
         repo: repoName,
       });
       
-      // Get reference to HEAD
       const { data: ref } = await octokit.git.getRef({
         owner: user.login,
         repo: repoName,
         ref: `heads/${repo.default_branch}`,
       });
       
-      // Create new branch
       await octokit.git.createRef({
         owner: user.login,
         repo: repoName,
@@ -108,16 +102,15 @@ export async function uploadToGitHub(
       });
     }
 
-    for (const [path, file] of Object.entries(zip.files)) {
-      if (file.dir) continue;
-
+    for (const file of files) {
       try {
         await rateLimiter.waitForToken();
 
-        const content = await file.async('base64');
-        
+        const arrayBuffer = await file.arrayBuffer();
+        const base64Content = await arrayBufferToBase64(arrayBuffer);
+        const path = file.name;
+
         try {
-          // Try to get existing file
           const { data: existingFile } = await octokit.repos.getContent({
             owner: user.login,
             repo: repoName,
@@ -125,34 +118,31 @@ export async function uploadToGitHub(
             ...(existingRepo && { ref: branchName }),
           });
 
-          // Update existing file
           await octokit.repos.createOrUpdateFileContents({
             owner: user.login,
             repo: repoName,
             path,
             message: `Update ${path}`,
-            content,
+            content: base64Content,
             sha: (existingFile as any).sha,
             ...(existingRepo && { branch: branchName }),
           });
         } catch (e) {
-          // File doesn't exist, create new file
           await octokit.repos.createOrUpdateFileContents({
             owner: user.login,
             repo: repoName,
             path,
             message: `Add ${path}`,
-            content,
+            content: base64Content,
             ...(existingRepo && { branch: branchName }),
           });
         }
       } catch (error: any) {
-        console.error(`Error uploading ${path}:`, error);
-        throw new Error(`Failed to upload ${path}: ${error.message}`);
+        console.error(`Error uploading ${file.name}:`, error);
+        throw new Error(`Failed to upload ${file.name}: ${error.message}`);
       }
     }
 
-    // If updating existing repo, create a pull request
     if (existingRepo) {
       const { data: pr } = await octokit.pulls.create({
         owner: user.login,
@@ -163,11 +153,19 @@ export async function uploadToGitHub(
         body: 'Updated repository content via Zip-to-Repo Manager',
       });
 
-      // Return the PR URL
       return pr.html_url;
     }
   } catch (error: any) {
-    console.error('Error processing ZIP file:', error);
-    throw new Error(error.message || 'Failed to process ZIP file');
+    console.error('Error processing files:', error);
+    throw new Error(error.message || 'Failed to process files');
   }
+}
+
+async function arrayBufferToBase64(buffer: ArrayBuffer): Promise<string> {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
